@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<!-- Created as an example by https://github.com/mcphee11 Version 4.0 -->
+<html>
+  <head>
+    <meta name="robots" content="noindex" />
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title></title>
+    <meta name="Template" content="" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Genesys CSS https://spark.genesys.com/ -->
+    <link href="https://unpkg.com/genesys-spark-components@4.83.0/dist/genesys-webcomponents/genesys-webcomponents.css" rel="stylesheet" />
+    <script type="module" src="https://unpkg.com/genesys-spark-components@4.83.0/dist/genesys-webcomponents/genesys-webcomponents.esm.js"></script>
+    <!-- Genesys SDK info https://developer.genesys.cloud/ -->
+    <script src="https://sdk-cdn.mypurecloud.com/javascript/latest/purecloud-platform-client-v2.min.js"></script>
+    <script src="https://sdk-cdn.mypurecloud.com/client-apps/2.6.4/purecloud-client-app-sdk.js"></script>
+  </head>
+  <body onload="start()">
+    <br />
+    <div style="display: flex"></div>
+    <br />
+    <gux-table object-table selectable-rows resizable-columns id="sortable-table">
+      <table slot="data">
+        <thead>
+          <tr data-row-id="head">
+            <th data-column-name="workBin">WorkBin</th>
+            <th data-column-name="status-category">StatusCategory</th>
+            <th data-column-name="status">Status</th>
+            <th data-column-name="idle">Idle</th>
+            <th data-column-name="acdStarted">AcdStarted</th>
+            <th data-column-name="alerting">Alerting</th>
+            <th data-column-name="connected">Connected</th>
+            <th data-column-name="parked">Parked</th>
+            <th data-column-name="held">Held</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </gux-table>
+
+    <!--Loader and modal-->
+    <gux-radial-loading id="loading" class="loading" screenreader-text="Loading..."></gux-radial-loading>
+    <script>
+      'use strict' //Enables strict mode is JavaScript
+      let url = new URL(document.location.href)
+      let gc_region = url.searchParams.get('gc_region')
+      let gc_clientId = url.searchParams.get('gc_clientId')
+      let gc_redirectUrl = url.searchParams.get('gc_redirectUrl')
+      let binNames = []
+      let totals = []
+
+      //Getting and setting the GC details from dynamic URL and session storage
+      gc_region ? sessionStorage.setItem('gc_region', gc_region) : (gc_region = sessionStorage.getItem('gc_region'))
+      gc_clientId ? sessionStorage.setItem('gc_clientId', gc_clientId) : (gc_clientId = sessionStorage.getItem('gc_clientId'))
+      gc_redirectUrl ? sessionStorage.setItem('gc_redirectUrl', gc_redirectUrl) : (gc_redirectUrl = sessionStorage.getItem('gc_redirectUrl'))
+
+      let platformClient = require('platformClient')
+      const client = platformClient.ApiClient.instance
+      const uapi = new platformClient.UsersApi()
+      const wapi = new platformClient.TaskManagementApi()
+
+      // Configure Client App for UI notifications
+      const ClientApp = window.purecloud.apps.ClientApp
+      const myClientApp = new ClientApp({
+        pcEnvironment: gc_region,
+      })
+
+      async function start() {
+        try {
+          client.setEnvironment(gc_region)
+          client.setPersistSettings(true, '_mm_')
+
+          console.log('%cLogging in to Genesys Cloud', 'color: green')
+          await client.loginImplicitGrant(gc_clientId, gc_redirectUrl, {})
+
+          //Enter in starting code.
+          await getWorkbins()
+          setTimeout(function () {
+            console.log('Finished')
+            document.getElementById('loading').style.display = 'none'
+            for (const row of totals) {
+              addRow(row.id, row.work_bin, row.status_category, row.status, row.Idle, row.AcdStarted, row.Alerting, row.Connected, row.Parked, row.Held, row.Disconnected)
+            }
+          }, 2000)
+        } catch (err) {
+          console.log('Error: ', err)
+        }
+      } //End of start() function
+
+      async function getWorkbins() {
+        document.getElementById('loading').style.display = 'block'
+        // TODO - Need to add paging for more then 200 workbins
+        let workbins = await wapi.postTaskmanagementWorkbinsQuery({ filters: [], pageSize: 200, sort: { name: 'name', ascending: true } })
+        // cant do a Promise.all due to concurrent rate limiting
+        for (const bin of workbins.entities) {
+          binNames.push({ id: bin.id, name: bin.name })
+          await getWorkItemsJobId(bin.id)
+        }
+      }
+
+      async function getWorkItemsJobId(id) {
+        document.getElementById('tbody').innerHTML = ''
+
+        let filters = [
+          { name: 'workbinId', type: 'String', operator: 'EQ', values: [id] },
+          { name: 'assignmentState', type: 'String', operator: 'NEQ', values: ['Terminated'] },
+          { name: 'assignmentState', type: 'String', operator: 'NEQ', values: ['Disconnected'] },
+        ]
+
+        let workItems = await wapi.postTaskmanagementWorkitemsQueryJobs({
+          filters: filters,
+          sort: { ascending: true },
+          pageSize: 200,
+          pageNumber: 1,
+          expands: ['status', 'type', 'queue', 'assignee'],
+        })
+
+        let status = setInterval(async function () {
+          let check = await wapi.getTaskmanagementWorkitemsQueryJob(workItems.id)
+          if (check.state == 'Succeeded') {
+            clearInterval(status)
+            getJobIdResults(check.id)
+          }
+        }, 1000)
+      }
+
+      async function getJobIdResults(jobId) {
+        let items = await wapi.getTaskmanagementWorkitemsQueryJobResults(jobId)
+        if (items.entities.length > 0) {
+          for (const item of items.entities) {
+            // prettier-ignore
+            let currentBin = totals.find(p => p.id == item.workbin.id && p.status == item.status.name )
+            // prettier-ignore
+            let currentBinName = binNames.find(p => p.id == item.workbin.id)
+            if (currentBin && currentBin.status_category == item.statusCategory && currentBin.status == item.status.name) {
+              currentBin.sum = ++currentBin.sum
+              currentBin[item.assignmentState] = ++currentBin[item.assignmentState]
+              continue
+            } else {
+              // prettier-ignore
+              item.assignmentState == 'Idle' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 1, AcdStarted: 0, Alerting: 0, Connected: 0, Parked: 0, Held: 0, Disconnected: 0 }) : null
+              // prettier-ignore
+              item.assignmentState == 'AcdStarted' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 0, AcdStarted: 1, Alerting: 0, Connected: 0, Parked: 0, Held: 0, Disconnected: 0 }) : null
+              // prettier-ignore
+              item.assignmentState == 'Alerting' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 0, AcdStarted: 0, Alerting: 1, Connected: 0, Parked: 0, Held: 0, Disconnected: 0 }) : null
+              // prettier-ignore
+              item.assignmentState == 'Connected' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 0, AcdStarted: 0, Alerting: 0, Connected: 1, Parked: 0, Held: 0, Disconnected: 0 }) : null
+              // prettier-ignore
+              item.assignmentState == 'Parked' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 0, AcdStarted: 0, Alerting: 0, Connected: 0, Parked: 1, Held: 0, Disconnected: 0 }) : null
+              // prettier-ignore
+              item.assignmentState == 'Held' ? totals.push({ id: item.workbin.id, work_bin: currentBinName.name, status_category: item.statusCategory, status: item.status.name, sum: 1, Idle: 0, AcdStarted: 0, Alerting: 0, Connected: 0, Parked: 0, Held: 1, Disconnected: 0 }) : null
+              continue
+            }
+            console.error('how did you get here?')
+          }
+          console.log(totals)
+        }
+      }
+
+      function addRow(id, work_bin, status_category, status, idle, acd_started, alerting, connected, parked, held) {
+        let table = document.getElementById('tbody')
+        let row = document.createElement('tr')
+        let T_work_bin = document.createElement('td')
+        let T_status_category = document.createElement('td')
+        let T_status = document.createElement('td')
+        let T_idle = document.createElement('td')
+        let T_acd_started = document.createElement('td')
+        let T_alerting = document.createElement('td')
+        let T_connected = document.createElement('td')
+        let T_parked = document.createElement('td')
+        let T_held = document.createElement('td')
+
+        row.id = id
+        T_work_bin.innerHTML = work_bin
+        T_status_category.innerHTML = status_category
+        T_status.innerHTML = status
+        T_idle.innerHTML = idle
+        T_acd_started.innerHTML = acd_started
+        T_alerting.innerHTML = alerting
+        T_connected.innerHTML = connected
+        T_parked.innerHTML = parked
+        T_held.innerHTML = held
+
+        row.appendChild(T_work_bin)
+        row.appendChild(T_status_category)
+        row.appendChild(T_status)
+        row.appendChild(T_idle)
+        row.appendChild(T_acd_started)
+        row.appendChild(T_alerting)
+        row.appendChild(T_connected)
+        row.appendChild(T_parked)
+        row.appendChild(T_held)
+
+        table.appendChild(row)
+      }
+    </script>
+  </body>
+  <style>
+    .tbody {
+      min-height: 400px;
+    }
+    .loading {
+      display: none;
+      margin-left: 47%;
+    }
+  </style>
+</html>

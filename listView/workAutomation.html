@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<!-- Created as an example by https://github.com/mcphee11 Version 4.0 -->
+<html>
+  <head>
+    <meta name="robots" content="noindex" />
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title></title>
+    <meta name="Template" content="" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Genesys CSS https://spark.genesys.com/ -->
+    <link href="https://unpkg.com/genesys-spark-components@4.83.0/dist/genesys-webcomponents/genesys-webcomponents.css" rel="stylesheet" />
+    <script type="module" src="https://unpkg.com/genesys-spark-components@4.83.0/dist/genesys-webcomponents/genesys-webcomponents.esm.js"></script>
+    <!-- Genesys SDK info https://developer.genesys.cloud/ -->
+    <script src="https://sdk-cdn.mypurecloud.com/javascript/latest/purecloud-platform-client-v2.min.js"></script>
+    <script src="https://sdk-cdn.mypurecloud.com/client-apps/2.6.4/purecloud-client-app-sdk.js"></script>
+  </head>
+  <body onload="start()">
+    <br />
+    <div style="display: flex">
+      <gux-dropdown id="dropdownWorkbin" class="drop" filter-type="starts-with" placeholder="Select a Workbin">
+        <gux-listbox id="listWorkbins" aria-label="types"></gux-listbox>
+      </gux-dropdown>
+      <gux-dropdown id="dropdownUser" class="drop" filter-type="starts-with" placeholder="Select a User">
+        <gux-listbox id="listUsers" aria-label="types"></gux-listbox>
+      </gux-dropdown>
+      <gux-form-field-checkbox class="btn">
+        <input id="hide" slot="input" type="checkbox" name="terminated" value="Terminated" checked />
+        <label id="hide" slot="label">Hide Terminated Workitems</label>
+      </gux-form-field-checkbox>
+      <gux-button id="assign" class="btn">
+        <gux-icon id="assign" icon-name="user" decorative></gux-icon>
+        Assign
+      </gux-button>
+      <gux-button id="assign-route" class="btn">
+        <gux-icon id="assign-route" icon-name="user" decorative></gux-icon>
+        Assign & Route
+      </gux-button>
+      <gux-button id="un-assign" class="btn">
+        <gux-icon id="un-assign" icon-name="user" decorative></gux-icon>
+        Un-Assign
+      </gux-button>
+      <gux-button id="refresh" class="btn">
+        <gux-icon id="refresh" icon-name="refresh" decorative></gux-icon>
+      </gux-button>
+      <gux-button accent="danger" id="terminate" class="btn_right">
+        <gux-icon id="terminate" icon-name="fa/trash-regular" decorative></gux-icon>
+        Terminate
+      </gux-button>
+    </div>
+    <br />
+    <gux-table object-table selectable-rows resizable-columns id="sortable-table">
+      <table slot="data">
+        <thead>
+          <tr data-row-id="head">
+            <th><gux-all-row-select></gux-all-row-select></th>
+            <th data-column-name="priority" data-cell-numeric aria-sort="ascending">Priority<gux-sort-control /></th>
+            <th data-column-name="due-date" aria-sort="ascending">Due Date<gux-sort-control /></th>
+            <th data-column-name="sla-status">SLA Status</th>
+            <th data-column-name="expiration-date">Expiration Date</th>
+            <th data-column-name="status">Status</th>
+            <th data-column-name="routing-state">Routing State</th>
+            <th data-column-name="assigned-to">Assigned To</th>
+            <th data-column-name="queue">Queue</th>
+            <th data-column-name="worktype">Worktype</th>
+            <th data-column-name="external-tag">External Tag</th>
+            <th data-column-name="name">Name</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </gux-table>
+
+    <!--Loader and modal-->
+
+    <gux-radial-loading id="loading" class="loading" screenreader-text="Loading..."></gux-radial-loading>
+
+    <gux-modal id="modal" size="small">
+      <div slot="title">Warning!</div>
+      <div slot="content">You are about to terminate the selected Workitems are you sure you want to do this?</div>
+      <div slot="start-align-buttons">
+        <gux-button-slot accent="primary">
+          <button onclick="terminateWorkItem(document.getElementById('dropdownWorkbin').value)" type="button">Accept</button>
+        </gux-button-slot>
+      </div>
+      <div slot="end-align-buttons">
+        <gux-button-slot>
+          <button autofocus onclick="document.getElementById('modal').close()" type="button">Cancel</button>
+        </gux-button-slot>
+      </div>
+    </gux-modal>
+    <script>
+      'use strict' //Enables strict mode is JavaScript
+      let url = new URL(document.location.href)
+      let gc_region = url.searchParams.get('gc_region')
+      let gc_clientId = url.searchParams.get('gc_clientId')
+      let gc_redirectUrl = url.searchParams.get('gc_redirectUrl')
+
+      //Getting and setting the GC details from dynamic URL and session storage
+      gc_region ? sessionStorage.setItem('gc_region', gc_region) : (gc_region = sessionStorage.getItem('gc_region'))
+      gc_clientId ? sessionStorage.setItem('gc_clientId', gc_clientId) : (gc_clientId = sessionStorage.getItem('gc_clientId'))
+      gc_redirectUrl ? sessionStorage.setItem('gc_redirectUrl', gc_redirectUrl) : (gc_redirectUrl = sessionStorage.getItem('gc_redirectUrl'))
+
+      let platformClient = require('platformClient')
+      const client = platformClient.ApiClient.instance
+      const uapi = new platformClient.UsersApi()
+      const wapi = new platformClient.TaskManagementApi()
+
+      // Configure Client App for UI notifications
+      const ClientApp = window.purecloud.apps.ClientApp
+      const myClientApp = new ClientApp({
+        pcEnvironment: gc_region,
+      })
+
+      async function start() {
+        try {
+          client.setEnvironment(gc_region)
+          client.setPersistSettings(true, '_mm_')
+
+          console.log('%cLogging in to Genesys Cloud', 'color: green')
+          await client.loginImplicitGrant(gc_clientId, gc_redirectUrl, {})
+
+          //GET Current UserId
+          let user = await uapi.getUsersMe({})
+          console.log(user)
+
+          //Enter in starting code.
+          getWorkbins()
+          getUsers()
+        } catch (err) {
+          console.log('Error: ', err)
+        }
+      } //End of start() function
+
+      window.addEventListener('click', function (e) {
+        //console.log(e.target.id)
+        let userId = document.getElementById('dropdownUser').value
+        let workItemId = document.getElementById('dropdownWorkbin').value
+
+        if ((e.target.id.includes('gux-option-') && e.target.parentNode.id === 'listWorkbins') || e.target.id === 'refresh') {
+          if (workItemId) {
+            getWorkItemsJobId(workItemId)
+          } else {
+            popUp(Date.now(), 'error', 'Select Workbin first')
+          }
+        }
+        if (e.target.id === 'assign') {
+          console.log(`userId: ${userId}`)
+          if (userId) {
+            assignUser(userId)
+          } else {
+            popUp(Date.now(), 'error', 'Select User first')
+          }
+        }
+        if (e.target.id === 'assign-route') {
+          console.log(`userId: ${userId}`)
+          if (userId) {
+            assignRouteUser(userId)
+          } else {
+            popUp(Date.now(), 'error', 'Select User first')
+          }
+        }
+        if (e.target.id === 'un-assign') {
+          console.log(`userId: ${userId}`)
+          if (userId) {
+            unAssignUser(userId)
+          } else {
+            popUp(Date.now(), 'error', 'Select User first')
+          }
+        }
+        if (e.target.id === 'terminate') {
+          console.log(`WorkbinId: ${workItemId}`)
+          if (workItemId) {
+            document.getElementById('modal').showModal()
+          } else {
+            popUp(Date.now(), 'error', 'Select Workbin first')
+          }
+        }
+      })
+
+      async function getWorkbins() {
+        // TODO - Need to add paging for more then 200 workbins in dropdown
+        let workbins = await wapi.postTaskmanagementWorkbinsQuery({ filters: [], pageSize: 200, sort: { name: 'name', ascending: true } })
+        console.log(workbins)
+        let list = document.getElementById('listWorkbins')
+        for (const bin of workbins.entities) {
+          let item = document.createElement('gux-option')
+          item.innerText = bin.name
+          item.setAttribute('value', bin.id)
+          list.appendChild(item)
+        }
+      }
+
+      async function getWorkItemsJobId(workbinId) {
+        document.getElementById('tbody').innerHTML = ''
+        document.getElementById('loading').style.display = 'block'
+        let filters
+
+        if (document.getElementById('hide').checked) {
+          filters = [
+            { name: 'workbinId', type: 'String', operator: 'EQ', values: [workbinId] },
+            { name: 'assignmentState', type: 'String', operator: 'NEQ', values: ['Terminated'] },
+          ]
+        } else {
+          filters = [{ name: 'workbinId', type: 'String', operator: 'EQ', values: [workbinId] }]
+        }
+        let workItems = await wapi.postTaskmanagementWorkitemsQueryJobs({
+          filters: filters,
+          sort: { name: 'priority', ascending: false },
+          pageSize: 200,
+          pageNumber: 1,
+          expands: ['status', 'type', 'queue', 'assignee'],
+        })
+
+        let status = setInterval(async function () {
+          console.log('checking job...')
+          let check = await wapi.getTaskmanagementWorkitemsQueryJob(workItems.id)
+          if (check.state == 'Succeeded') {
+            clearInterval(status)
+            getJobIdResults(check.id)
+          }
+        }, 1000)
+        console.log(workItems)
+      }
+
+      async function getJobIdResults(jobId) {
+        console.log('got job!!!')
+        let items = await wapi.getTaskmanagementWorkitemsQueryJobResults(jobId)
+        console.log(items)
+        if (items.entities.length > 0) {
+          for (const item of items.entities) {
+            addRow(item.id, item.priority, item.dateDue, 'TODO', item.dateExpires, item.statusCategory, item.assignmentState, item.assignee?.name, item.queue?.name, item.type?.name, 'TODO', item.name)
+          }
+        }
+        document.getElementById('loading').style.display = 'none'
+      }
+
+      async function getUsers() {
+        // TODO - if more then 500 active users in ORG need setup paging
+        let users = await uapi.getUsers({
+          pageSize: 500,
+          expand: ['presence'],
+          state: 'active',
+        })
+        console.log(users)
+        let list = document.getElementById('listUsers')
+        for (const user of users.entities) {
+          let item = document.createElement('gux-option')
+          item.innerText = user.name
+          item.setAttribute('value', user.id)
+          list.appendChild(item)
+        }
+      }
+
+      async function assignUser(userId) {
+        try {
+          console.log('assigning user')
+          let rows = document.getElementById('tbody').children
+          for (const row of rows) {
+            if (row?.attributes[1]?.name == 'data-selected-row') {
+              try {
+                if (row?.children[6]?.innerText === 'AcdStarted') {
+                  let assign = await wapi.patchTaskmanagementWorkitemAssignment(row.id, {
+                    id: userId,
+                  })
+                  console.log(assign)
+                } else {
+                  let assign = await wapi.patchTaskmanagementWorkitem(row.id, {
+                    assigneeId: userId,
+                  })
+                  console.log(assign)
+                }
+              } catch (err) {
+                if (err.message.includes(' is off-queue')) {
+                  popUp(Date.now(), 'error', 'User needs to be "On-Queue" first.')
+                } else {
+                  popUp(Date.now(), 'warning', err.message)
+                  console.warn(err)
+                }
+                continue
+              }
+            }
+          }
+          popUp(Date.now(), 'success', 'Completed Assigning. Refresh to see changes')
+        } catch (err) {
+          console.error(err)
+        }
+      }
+
+      async function assignRouteUser(userId) {
+        try {
+          console.log('assigning user')
+          let rows = document.getElementById('tbody').children
+          for (const row of rows) {
+            if (row?.attributes[1]?.name == 'data-selected-row') {
+              try {
+                if (row?.children[6]?.innerText === 'AcdStarted') {
+                  let assign = await wapi.patchTaskmanagementWorkitemAssignment(row.id, {
+                    id: userId,
+                  })
+                  console.log(assign)
+                } else {
+                  let assign = await wapi.patchTaskmanagementWorkitem(row.id, {
+                    assigneeId: userId,
+                    assignmentOperation: 'AgentAssignmentAlerting',
+                  })
+                  console.log(assign)
+                }
+              } catch (err) {
+                if (err.message.includes(' is off-queue')) {
+                  popUp(Date.now(), 'error', 'User needs to be "On-Queue" first.')
+                } else {
+                  popUp(Date.now(), 'warning', err.message)
+                  console.warn(err)
+                }
+                continue
+              }
+            }
+          }
+          popUp(Date.now(), 'success', 'Completed Assigning and Routing. Refresh to see changes')
+        } catch (err) {
+          console.error(err)
+        }
+      }
+
+      async function unAssignUser(userId) {
+        try {
+          console.log('un assigning user')
+          let rows = document.getElementById('tbody').children
+          for (const row of rows) {
+            if (row?.attributes[1]?.name == 'data-selected-row') {
+              try {
+                let assign = await wapi.patchTaskmanagementWorkitem(row.id, {
+                  assigneeId: null,
+                })
+                console.log(assign)
+              } catch (err) {
+                if (err.message.includes(' is off-queue')) {
+                  popUp(Date.now(), 'error', 'User needs to be "On-Queue" first.')
+                } else {
+                  popUp(Date.now(), 'warning', err.message)
+                  console.warn(err)
+                }
+                continue
+              }
+            }
+          }
+          popUp(Date.now(), 'Success', 'Completed Un-Assigning. Refresh to see changes')
+        } catch (err) {
+          console.error(err)
+        }
+      }
+
+      async function terminateWorkItem(workItemId) {
+        try {
+          document.getElementById('modal').close()
+          console.warn('terminating workitem')
+          let rows = document.getElementById('tbody').children
+          for (const row of rows) {
+            if (row?.attributes[1]?.name == 'data-selected-row') {
+              try {
+                let terminate = await wapi.postTaskmanagementWorkitemTerminate(row.id, {})
+                console.log(terminate)
+              } catch (err) {
+                popUp(Date.now(), 'error', err.message)
+                console.warn(err)
+                continue
+              }
+            }
+          }
+          popUp(Date.now(), 'Success', 'Completed Terminating. Refresh to see changes')
+        } catch (err) {
+          console.error(err)
+        }
+      }
+
+      function popUp(id, type, message) {
+        let time = id.toString()
+        let options = {
+          id: time,
+          timeout: 3,
+          showCloseButton: true,
+        }
+        myClientApp.alerting.showToastPopup('', message, options)
+      }
+
+      function addRow(id, priority, due_date, sla_status, expiration_date, status, routing_state, assigned_to, queue, worktype, external_tag, name) {
+        let table = document.getElementById('tbody')
+        let row = document.createElement('tr')
+        let select = document.createElement('td')
+        let T_priority = document.createElement('td')
+        let T_due_date = document.createElement('td')
+        let T_sla_status = document.createElement('td')
+        let T_expiration_date = document.createElement('td')
+        let T_status = document.createElement('td')
+        let T_routing_state = document.createElement('td')
+        let T_assigned_to = document.createElement('td')
+        let T_queue = document.createElement('td')
+        let T_worktype = document.createElement('td')
+        let T_external_tag = document.createElement('td')
+        let T_name = document.createElement('td')
+
+        row.id = id
+        select.innerHTML = '<gux-row-select></gux-row-select>'
+        T_priority.innerHTML = priority
+        T_due_date.innerHTML = new Date(due_date).toLocaleString()
+        T_sla_status.innerHTML = sla_status
+        T_expiration_date.innerHTML = new Date(expiration_date).toLocaleString()
+        T_status.innerHTML = status
+        T_routing_state.innerHTML = routing_state
+        T_assigned_to.innerHTML = assigned_to
+        T_queue.innerHTML = queue
+        T_worktype.innerHTML = worktype
+        T_external_tag.innerHTML = external_tag
+        T_name.innerHTML = name
+
+        row.appendChild(select)
+        row.appendChild(T_priority)
+        row.appendChild(T_due_date)
+        row.appendChild(T_sla_status)
+        row.appendChild(T_expiration_date)
+        row.appendChild(T_status)
+        row.appendChild(T_routing_state)
+        row.appendChild(T_assigned_to)
+        row.appendChild(T_queue)
+        row.appendChild(T_worktype)
+        row.appendChild(T_external_tag)
+        row.appendChild(T_name)
+
+        table.appendChild(row)
+      }
+    </script>
+  </body>
+  <style
+    onload="(function () {
+    function ascending( a, b ) {
+      if ( a.textContent < b.textContent ){
+        return -1;
+      }
+      if ( a.textContent > b.textContent ){
+        return 1;
+      }
+      return 0;
+    }
+    function shuffle( a, b ) {
+      return 0.5 - Math.random();
+    }
+    const table = document.querySelector('#sortable-table');
+    table.addEventListener('guxsortchanged',
+    (event) => {
+      const {columnName, sortDirection} = event.detail;
+      const columns = Array.from(table.querySelectorAll('thead tr th')).forEach((column) => column.removeAttribute('aria-sort'));
+      const column = table.querySelector(`thead tr th[data-column-name='` + columnName + `']`);
+      column.setAttribute('aria-sort', sortDirection);
+      const tableBody = table.querySelector('tbody');
+      switch (sortDirection) {
+        case 'ascending':
+          [...tableBody.children].sort(ascending).forEach(node=>tableBody.appendChild(node));
+          break;
+        case 'descending':
+          [...tableBody.children].sort(ascending).reverse().forEach(node=>tableBody.appendChild(node));
+          break;
+        default:
+          [...tableBody.children].sort(shuffle).forEach(node=>tableBody.appendChild(node));
+          break;
+      }
+    })
+  })()"
+  >
+    .not-used {
+      -custom-noop: noop;
+    }
+
+    .gux-sticky-cell {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+    }
+
+    .gux-sticky-cell-2 {
+      position: sticky;
+      left: 89px;
+      z-index: 1;
+    }
+
+    .gux-sticky-cell-header-style {
+      background-color: var(--gse-ui-dataTableItems-header-fixedBackgroundColor);
+    }
+    .drop {
+      width: 25dvw;
+      max-width: 200px;
+      display: block;
+      margin: 8px;
+    }
+    .btn {
+      margin: 8px;
+      align-self: center;
+    }
+    .btn_right {
+      align-self: center;
+      margin-left: auto;
+      margin-top: 8px;
+      margin-bottom: 8px;
+      margin-right: 8px;
+    }
+    .tbody {
+      min-height: 200px;
+    }
+    .loading {
+      display: none;
+      margin-left: 47%;
+    }
+  </style>
+</html>
